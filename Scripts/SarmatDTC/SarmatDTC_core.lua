@@ -131,6 +131,61 @@ end
 
 M.dist = dist
 
+-- Point-in-polygon on x/z (ray cast); ring = { {x, z}, ... } (closed or not).
+function M.pointInPolygon(x, z, ring)
+    local inside, j = false, #ring
+    for i = 1, #ring do
+        local xi, zi, xj, zj = ring[i].x, ring[i].z, ring[j].x, ring[j].z
+        if (zi > z) ~= (zj > z) and x < (xj - xi) * (z - zi) / (zj - zi) + xi then
+            inside = not inside
+        end
+        j = i
+    end
+    return inside
+end
+
+-- Segments (ax,az)-(bx,bz) and (cx,cz)-(dx,dz) properly cross.
+local function segsCross(ax, az, bx, bz, cx, cz, dx, dz)
+    local d1 = (dx - cx) * (az - cz) - (dz - cz) * (ax - cx)
+    local d2 = (dx - cx) * (bz - cz) - (dz - cz) * (bx - cx)
+    local d3 = (bx - ax) * (cz - az) - (bz - az) * (cx - ax)
+    local d4 = (bx - ax) * (dz - az) - (bz - az) * (dx - ax)
+    return ((d1 > 0) ~= (d2 > 0)) and ((d3 > 0) ~= (d4 > 0))
+end
+
+-- The sectors of s.sectors the front line runs through (a front point inside the ring, or
+-- the ring and the front polyline cross). nil when the map data has no sectors at all.
+function M.activeSectors(s)
+    if #s.sectors == 0 then return nil end
+    local out = {}
+    for _, sec in ipairs(s.sectors) do
+        local hit = false
+        for _, p in ipairs(s.front) do
+            if M.pointInPolygon(p.x, p.z, sec.ring) then hit = true break end
+        end
+        local ring = sec.ring
+        for i = 1, #ring - 1 do
+            if hit then break end
+            for j = 1, #s.front - 1 do
+                if segsCross(ring[i].x, ring[i].z, ring[i + 1].x, ring[i + 1].z,
+                    s.front[j].x, s.front[j].z, s.front[j + 1].x, s.front[j + 1].z) then
+                    hit = true break
+                end
+            end
+        end
+        if hit then out[#out + 1] = sec end
+    end
+    return out
+end
+
+-- x/z inside any of the given sector rings.
+function M.inAnySector(x, z, sectors)
+    for _, sec in ipairs(sectors) do
+        if M.pointInPolygon(x, z, sec.ring) then return true end
+    end
+    return false
+end
+
 ------------------------------------------------------------------------------
 -- terrain helpers for modules
 ------------------------------------------------------------------------------
@@ -402,6 +457,7 @@ end
 --     strongholds = { {x, z, friendly, name}, ... } -- strongholds (objectives kind "Stronghold")
 --     strongpoints = { {x, z, friendly, name}, ... } -- alive strongpoints (status.strong kind "OP*")
 --     spawn  = { x, z, name } | nil                 -- own start base (env.spawn), set by M.build
+--     sectors = { {ring = {{x, z}, ...}, owner, name}, ... } -- map sectors (status.geo.sectors)
 --     env    = env                                  -- set by M.build, for lib.elevation/latLon/cartridge
 --     skipped = n                                   -- malformed map records left out
 -- }
@@ -409,10 +465,25 @@ function M.situation(status, units, mySide)
     status, units = listOf(status), listOf(units)
     mySide = sideKey(mySide) or "blue"
     local s = { side = mySide, front = {}, groups = {}, sites = {}, farps = {},
-        airfields = {}, strongholds = {}, strongpoints = {}, skipped = 0 }
+        airfields = {}, strongholds = {}, strongpoints = {}, sectors = {}, skipped = 0 }
 
     for _, p in ipairs(listOf(status.front)) do
         if placed(s, p) then s.front[#s.front + 1] = { x = p.x, z = p.z } end
+    end
+
+    for _, sec in ipairs(listOf(type(status.geo) == "table" and status.geo.sectors)) do
+        if type(sec) == "table" and type(sec.ring) == "table" then
+            local ring = {}
+            for _, p in ipairs(sec.ring) do
+                if type(p) == "table" and isNum(p[1]) and isNum(p[2]) then
+                    ring[#ring + 1] = { x = p[1], z = p[2] }
+                end
+            end
+            if #ring >= 3 then
+                s.sectors[#s.sectors + 1] = { ring = ring, owner = sideKey(sec.owner),
+                    name = textOf(sec.name) }
+            end
+        end
     end
 
     for _, g in ipairs(listOf(units.groups)) do
